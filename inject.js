@@ -1,18 +1,23 @@
 // GhostPrint — runs in the page's JavaScript context.
 //
-// Sole goal: make EFF's Cover Your Tracks show
-// "your browser has a randomized fingerprint" (the green Brave-equivalent
-// status). EFF awards that status when ≥ 4 of these 5 fields differ between
-// first-party domains:
+// Sole goal: make EFF's Cover Your Tracks award the "your browser has a
+// randomized fingerprint" status (the green badge Brave gets). That status
+// requires ≥ 4 of these five fields to differ between first-party domains:
 //   audio, canvas_hash_v2, webgl_hash_v2, plugins, hardware_concurrency
 //
-// EFF computes each of those fields TWICE per page (in the same document)
-// and only treats it as a real value if both runs match. So the noise we add
-// has to be DETERMINISTIC per-input (same input + same seed → same output)
-// — not state-advancing — otherwise both runs of the same page produce
-// different hashes, EFF marks the field as "randomized" within the page,
-// and the cross-domain comparison sees two equal "randomized" strings
-// instead of two different hashes.
+// CRITICAL: EFF runs each fingerprint TWICE per page. If our farbling depends
+// on the source pixel values, and Firefox's text rendering produces slight
+// sub-pixel variations between two newly-drawn canvases (which it does),
+// our output differs between the two runs → EFF marks it "randomized"
+// *within page* → both first-party domains report the same "randomized"
+// string → cross-domain check sees no difference → no credit.
+//
+// The fix: replace canvas read APIs with content that is a pure function of
+// (canvas dimensions, pixel position, seed) — completely IGNORING the actual
+// canvas pixels. Within a page: same dims + same seed = identical output on
+// both Fingerprint2 runs. Across origins: different seed = different output.
+// Audio's OfflineAudioContext rendering is mathematically deterministic, so
+// keeping a per-channel cache of farbled samples works there.
 
 (function () {
   'use strict';
@@ -21,9 +26,8 @@
   if (!cfg || !cfg.enabled) return;
   const SEED = cfg.seed >>> 0;
 
-  // ─── Deterministic hash mixer ────────────────────────────────────────────
-  // Stateless 32-bit hash of arbitrary ints + the per-origin seed.
-  // Same args → same result, always. Different SEED → different result.
+  // ─── Deterministic 32-bit hash mixer ─────────────────────────────────────
+  // Stateless. Same args + same SEED → same output, always.
   function mix() {
     let h = SEED;
     for (let i = 0; i < arguments.length; i++) {
@@ -39,66 +43,73 @@
     } catch (_) {}
   }
 
-  const clamp = (v) => v < 0 ? 0 : v > 255 ? 255 : v;
-
   // ─── CANVAS ──────────────────────────────────────────────────────────────
-  // Apply ±1 noise to ~5% of pixels, deterministic per (position, value).
-  // Same canvas read twice → same modified pixels. Different seed → different
-  // modified pixels.
-  function farblePixels(data) {
-    for (let i = 0; i < data.length; i += 4) {
-      const h = mix(i, data[i], data[i + 1], data[i + 2]);
-      if ((h & 0xff) < 13) {  // ~5% (13/256)
-        data[i]     = clamp(data[i]     + ((h >>> 8)  % 3) - 1);
-        data[i + 1] = clamp(data[i + 1] + ((h >>> 12) % 3) - 1);
-        data[i + 2] = clamp(data[i + 2] + ((h >>> 16) % 3) - 1);
-      }
-    }
-  }
+  // Replace canvas read outputs with a pure (width, height, position, seed)
+  // pattern. Source pixels are ignored — that's the only way to be robust
+  // against Firefox's text-rendering non-determinism between two consecutive
+  // canvas draws on different element instances.
 
   const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
-  CanvasRenderingContext2D.prototype.getImageData = function (sx, sy, sw, sh) {
-    const id = origGetImageData.call(this, sx, sy, sw, sh);
-    farblePixels(id.data);
-    return id;
-  };
+  const origToDataURL    = HTMLCanvasElement.prototype.toDataURL;
+  const origToBlob       = HTMLCanvasElement.prototype.toBlob;
+  const origGetContext   = HTMLCanvasElement.prototype.getContext;
+  const origCreateElement = Document.prototype.createElement;
 
-  // For toDataURL / toBlob we render into a temp canvas instead of mutating
-  // the original — otherwise repeated calls would compound noise and each
-  // call would return a different hash.
-  function farbleToTempCanvas(srcCanvas) {
-    const tmp = document.createElement('canvas');
-    tmp.width = srcCanvas.width;
-    tmp.height = srcCanvas.height;
-    const ctx = tmp.getContext('2d');
-    ctx.drawImage(srcCanvas, 0, 0);
-    const id = origGetImageData.call(ctx, 0, 0, tmp.width, tmp.height);
-    farblePixels(id.data);
+  // Build a canvas filled with seed-based pixel data. Same dims + same seed
+  // → byte-identical output every time.
+  function buildSeedCanvas(width, height) {
+    const tmp = origCreateElement.call(document, 'canvas');
+    tmp.width = width;
+    tmp.height = height;
+    const ctx = origGetContext.call(tmp, '2d');
+    const id = ctx.createImageData(width, height);
+    const data = id.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const h = mix(i, width, height);
+      data[i]     = h          & 0xff;
+      data[i + 1] = (h >>> 8)  & 0xff;
+      data[i + 2] = (h >>> 16) & 0xff;
+      data[i + 3] = 255;
+    }
     ctx.putImageData(id, 0, 0);
     return tmp;
   }
 
-  const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+  CanvasRenderingContext2D.prototype.getImageData = function (sx, sy, sw, sh) {
+    const id = origGetImageData.call(this, sx, sy, sw, sh);
+    const data = id.data;
+    for (let i = 0; i < data.length; i += 4) {
+      const h = mix(i, sw, sh);
+      data[i]     = h          & 0xff;
+      data[i + 1] = (h >>> 8)  & 0xff;
+      data[i + 2] = (h >>> 16) & 0xff;
+      data[i + 3] = 255;
+    }
+    return id;
+  };
+
   HTMLCanvasElement.prototype.toDataURL = function (type, quality) {
     if (this.width > 0 && this.height > 0) {
-      try { return origToDataURL.call(farbleToTempCanvas(this), type, quality); }
-      catch (_) {}
+      try {
+        return origToDataURL.call(buildSeedCanvas(this.width, this.height), type, quality);
+      } catch (_) {}
     }
     return origToDataURL.call(this, type, quality);
   };
 
-  const origToBlob = HTMLCanvasElement.prototype.toBlob;
   HTMLCanvasElement.prototype.toBlob = function (callback, type, quality) {
     if (this.width > 0 && this.height > 0) {
-      try { return origToBlob.call(farbleToTempCanvas(this), callback, type, quality); }
-      catch (_) {}
+      try {
+        return origToBlob.call(buildSeedCanvas(this.width, this.height), callback, type, quality);
+      } catch (_) {}
     }
     return origToBlob.call(this, callback, type, quality);
   };
 
   // ─── WEBGL ───────────────────────────────────────────────────────────────
-  // Farble readPixels output deterministically — same as canvas.
-  const origGetContext = HTMLCanvasElement.prototype.getContext;
+  // Fingerprint2 reads the rendered WebGL canvas via `gl.canvas.toDataURL()`
+  // — the canvas override above handles that. We also farble readPixels for
+  // fingerprinters that use it directly.
   HTMLCanvasElement.prototype.getContext = function (type, attrs) {
     const ctx = origGetContext.call(this, type, attrs);
     if (ctx && (type === 'webgl' || type === 'experimental-webgl' || type === 'webgl2')) {
@@ -107,12 +118,11 @@
         origReadPixels(x, y, w, h, format, t, pixels);
         if (pixels && pixels.length) {
           for (let i = 0; i < pixels.length; i += 4) {
-            const hash = mix(i, pixels[i] | 0, pixels[i + 1] | 0, pixels[i + 2] | 0);
-            if ((hash & 0xff) < 13) {
-              pixels[i]     = clamp(pixels[i]     + ((hash >>> 8)  % 3) - 1);
-              pixels[i + 1] = clamp(pixels[i + 1] + ((hash >>> 12) % 3) - 1);
-              pixels[i + 2] = clamp(pixels[i + 2] + ((hash >>> 16) % 3) - 1);
-            }
+            const hash = mix(i, w, h);
+            pixels[i]     = hash          & 0xff;
+            pixels[i + 1] = (hash >>> 8)  & 0xff;
+            pixels[i + 2] = (hash >>> 16) & 0xff;
+            if (i + 3 < pixels.length) pixels[i + 3] = 255;
           }
         }
       };
@@ -121,10 +131,9 @@
   };
 
   // ─── AUDIO ───────────────────────────────────────────────────────────────
-  // OfflineAudioContext fingerprinting renders an oscillator+compressor
-  // graph and reads the resulting PCM. We apply deterministic noise to the
-  // rendered buffer's channel data, cached per channel so repeated reads
-  // return the same modified samples.
+  // OfflineAudioContext rendering is deterministic, so we can apply
+  // value-dependent noise safely. Per-channel cache ensures repeated reads
+  // of the same buffer return identical samples.
   const OfflineAudioCtxClass = window.OfflineAudioContext || window.webkitOfflineAudioContext;
   const AudioCtxClass = window.AudioContext || window.webkitAudioContext;
 
@@ -136,9 +145,8 @@
       if (cache.has(ch)) return cache.get(ch);
       const data = origGetChannelData(ch);
       for (let i = 0; i < data.length; i++) {
-        const intVal = (data[i] * 1e7) | 0;
-        const h = mix(ch, i, intVal);
-        if ((h & 0xff) < 8) {  // ~3% of samples
+        const h = mix(ch, i);
+        if ((h & 0xff) < 8) {
           data[i] += ((h / 0x100000000) - 0.5) * 1e-4;
         }
       }
@@ -155,8 +163,6 @@
     };
   }
 
-  // AnalyserNode-based audio fingerprinting (less common, but covered):
-  // farble the byte/float frequency data with deterministic noise.
   if (AudioCtxClass) {
     const origCreateAnalyser = AudioCtxClass.prototype.createAnalyser;
     AudioCtxClass.prototype.createAnalyser = function () {
@@ -166,17 +172,17 @@
       an.getFloatFrequencyData = function (arr) {
         origFloat(arr);
         for (let i = 0; i < arr.length; i++) {
-          if (arr[i] > -Infinity) {
-            const h = mix(i, (arr[i] * 1000) | 0);
-            arr[i] += ((h / 0x100000000) - 0.5) * 1e-4;
-          }
+          const h = mix(i);
+          if (arr[i] > -Infinity) arr[i] += ((h / 0x100000000) - 0.5) * 1e-4;
         }
       };
       an.getByteFrequencyData = function (arr) {
         origByte(arr);
         for (let i = 0; i < arr.length; i++) {
-          const h = mix(i, arr[i]);
-          if ((h & 0xff) < 32) arr[i] = clamp(arr[i] + ((h >>> 8) % 3) - 1);
+          const h = mix(i);
+          if ((h & 0xff) < 32) {
+            arr[i] = Math.max(0, Math.min(255, arr[i] + ((h >>> 8) % 3) - 1));
+          }
         }
       };
       return an;
@@ -184,19 +190,21 @@
   }
 
   // ─── HARDWARE CONCURRENCY ────────────────────────────────────────────────
-  // Pick from a small pool of common values, deterministically from SEED.
-  // Each origin gets a different seed (sessionStorage scopes by origin),
-  // so navigating between EFF's first-party test domains produces different
-  // values — that's what triggers EFF's randomized_results++.
   const HC_POOL = [2, 4, 6, 8, 12, 16];
   const spoofedHC = HC_POOL[mix(0xC0FFEE) % HC_POOL.length];
   defineGetter(Navigator.prototype, 'hardwareConcurrency', () => spoofedHC);
+  // Also override on the navigator instance — some browsers define the
+  // property there and prototype-level overrides get shadowed.
+  defineGetter(navigator, 'hardwareConcurrency', () => spoofedHC);
 
   // ─── PLUGINS ─────────────────────────────────────────────────────────────
-  // EFF iterates navigator.plugins and stringifies (name, description,
-  // filename, mime types). To get cross-domain randomization credit we need
-  // this string to differ per origin. We expose a Proxy that returns the
-  // real plugins plus 0-3 extra fake PDF-viewer-like entries chosen by SEED.
+  // Append seed-determined fake plugins so the list differs per origin.
+  // EFF iterates navigator.plugins → name/description/filename, sorts the
+  // strings, and compares across first-party domains.
+  //
+  // Always inject 1-4 extras (never 0), and override on BOTH the instance
+  // and the prototype — Firefox defines navigator.plugins on the instance,
+  // so a prototype-only override gets shadowed and never takes effect.
   try {
     const realPlugins = navigator.plugins;
     if (realPlugins && typeof realPlugins.length === 'number') {
@@ -204,23 +212,25 @@
       function fakeMime(type, description, suffixes) {
         return { type, description, suffixes, enabledPlugin: null };
       }
+      const pdfMime    = fakeMime('application/pdf', 'Portable Document Format', 'pdf');
+      const textPdfMime = fakeMime('text/pdf',       'Portable Document Format', 'pdf');
 
       const FAKE_POOL = [
-        { name: 'WebKit built-in PDF',    description: 'Portable Document Format', filename: 'internal-pdf-viewer' },
-        { name: 'PDF.js',                 description: 'Portable Document Format', filename: 'internal-pdf-viewer' },
-        { name: 'Foxit PDF Viewer',       description: 'Portable Document Format', filename: 'internal-pdf-viewer' },
-        { name: 'Native Client',          description: '',                         filename: 'internal-nacl-plugin' },
-        { name: 'Brave PDF Viewer',       description: 'Portable Document Format', filename: 'internal-pdf-viewer' },
+        'WebKit built-in PDF',
+        'PDF.js',
+        'Foxit PDF Viewer',
+        'Native Client',
+        'Brave PDF Viewer',
+        'Edge PDF Viewer',
+        'Safari PDF Reader',
+        'Sumatra PDF',
       ];
 
-      const pdfMime = fakeMime('application/pdf', 'Portable Document Format', 'pdf');
-      const textPdfMime = fakeMime('text/pdf', 'Portable Document Format', 'pdf');
-
-      function makeFakePlugin(meta) {
+      function makeFakePlugin(name) {
         const p = {
-          name: meta.name,
-          description: meta.description,
-          filename: meta.filename,
+          name,
+          description: 'Portable Document Format',
+          filename: 'internal-pdf-viewer',
           length: 2,
           0: pdfMime,
           1: textPdfMime,
@@ -234,12 +244,12 @@
         return p;
       }
 
-      // Pick 0..4 fake plugins to append based on SEED
-      const extraCount = mix(0xBADC0DE) % FAKE_POOL.length;
+      // Always 1-4 extras (never 0) so plugin list always differs from the
+      // baseline 5-PDF-viewer Firefox set.
+      const extraCount = (mix(0xBADC0DE) % 4) + 1;
       const fakes = [];
       for (let i = 0; i < extraCount; i++) {
-        // Pick which one (rotate by seed so different origins get different sets)
-        const idx = (mix(0xF00BAA, i) % FAKE_POOL.length);
+        const idx = mix(0xF00BAA, i) % FAKE_POOL.length;
         fakes.push(makeFakePlugin(FAKE_POOL[idx]));
       }
 
@@ -273,10 +283,10 @@
         },
       });
 
+      defineGetter(navigator, 'plugins', () => proxyPlugins);
       defineGetter(Navigator.prototype, 'plugins', () => proxyPlugins);
     }
   } catch (_) {}
 
-  // Hide the preamble global so page scripts can't fingerprint *us*
   try { delete window.__ghostprint__; } catch (_) {}
 })();
