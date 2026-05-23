@@ -8,6 +8,8 @@
     "storage",
     "tabs",
     "activeTab",
+    "webRequest",
+    "webRequestBlocking",
     "<all_urls>"
   ],
   "background": {

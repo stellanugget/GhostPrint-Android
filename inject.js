@@ -83,34 +83,69 @@
     return origToBlob.call(this, callback, type, quality);
   };
 
-  // ─── WEBGL FINGERPRINTING ────────────────────────────────────────────────
-  // Spoofs UNMASKED_VENDOR/RENDERER with realistic pairs that also match the
-  // user's actual OS. Cross-platform mismatches (Adreno on Linux x86_64, Apple
-  // GPU on Windows, etc.) are impossible in the wild and instantly unique.
-
-  const _plat = (navigator.platform || '').toLowerCase();
-  let GL_PAIRS;
-  if (_plat.includes('linux')) {
-    GL_PAIRS = [
-      { vendor: 'Mesa/X.org',          renderer: 'llvmpipe (LLVM 15.0.7, 256 bits)' },
-      { vendor: 'Intel',               renderer: 'Mesa Intel(R) UHD Graphics 620 (KBL GT2)' },
-      { vendor: 'Intel',               renderer: 'Mesa Intel(R) HD Graphics 630 (KBL GT2)' },
-      { vendor: 'NVIDIA Corporation',  renderer: 'NVIDIA GeForce GTX 1650/PCIe/SSE2' },
-      { vendor: 'AMD',                 renderer: 'AMD Radeon RX 580 Series (POLARIS10, DRM 3.49.0)' },
-    ];
-  } else if (_plat.includes('mac')) {
-    GL_PAIRS = [
-      { vendor: 'Apple GPU',  renderer: 'Apple GPU' },
-      { vendor: 'Intel Inc.', renderer: 'Intel Iris OpenGL Engine' },
-    ];
-  } else {
-    // Windows / other
-    GL_PAIRS = [
-      { vendor: 'Intel Inc.',             renderer: 'Intel(R) HD Graphics 630' },
-      { vendor: 'NVIDIA Corporation',     renderer: 'GeForce GTX 1660 Ti/PCIe/SSE2' },
-      { vendor: 'ATI Technologies Inc.',  renderer: 'Radeon RX 580 Series' },
-    ];
+  // measureText: font detection scripts measure text rendered in candidate
+  // fonts and compare widths against a fallback. Adding deterministic
+  // sub-pixel noise per (text, font, prop) prevents stable measurements
+  // without visible rendering changes.
+  function textNoise(text, propName, fontState) {
+    let h = SEED;
+    const stir = (s) => {
+      for (let i = 0; i < s.length; i++) {
+        h = Math.imul(h ^ s.charCodeAt(i), 0x9e3779b9) >>> 0;
+      }
+    };
+    stir(text);
+    stir(propName);
+    stir(fontState);
+    return ((h / 4294967296) - 0.5) * 0.005;  // ±0.0025 px
   }
+
+  const origMeasureText = CanvasRenderingContext2D.prototype.measureText;
+  CanvasRenderingContext2D.prototype.measureText = function (text) {
+    const metrics = origMeasureText.call(this, text);
+    const fontState = this.font || '';
+    return new Proxy(metrics, {
+      get(target, prop) {
+        const val = Reflect.get(target, prop);
+        if (typeof val === 'number') return val + textNoise(String(text), String(prop), fontState);
+        return val;
+      }
+    });
+  };
+
+  // Same defence for OffscreenCanvas if available
+  if (typeof OffscreenCanvasRenderingContext2D !== 'undefined') {
+    const origOffMeasureText = OffscreenCanvasRenderingContext2D.prototype.measureText;
+    OffscreenCanvasRenderingContext2D.prototype.measureText = function (text) {
+      const metrics = origOffMeasureText.call(this, text);
+      const fontState = this.font || '';
+      return new Proxy(metrics, {
+        get(target, prop) {
+          const val = Reflect.get(target, prop);
+          if (typeof val === 'number') return val + textNoise(String(text), String(prop), fontState);
+          return val;
+        }
+      });
+    };
+  }
+
+  // ─── WEBGL FINGERPRINTING ────────────────────────────────────────────────
+  // Use SHORT generic GPU strings. Long platform-suffixed strings like
+  // "Mesa Intel(R) UHD Graphics 620 (KBL GT2)" matched only ~40k browsers
+  // in EFF's DB (15+ bits). Generic names without driver/codename suffixes
+  // match orders of magnitude more.
+  //
+  // Includes "Mozilla/Mozilla" — the value Firefox returns when
+  // privacy.resistFingerprinting=true. Privacy-conscious users frequently
+  // expose this combo, so picking it blends our users with that pool.
+
+  const GL_PAIRS = [
+    { vendor: 'Mozilla',              renderer: 'Mozilla' },
+    { vendor: 'Mesa/X.org',           renderer: 'llvmpipe' },
+    { vendor: 'Intel Inc.',           renderer: 'Intel(R) HD Graphics' },
+    { vendor: 'NVIDIA Corporation',   renderer: 'NVIDIA GeForce GTX 1650' },
+    { vendor: 'AMD',                  renderer: 'AMD Radeon RX 580' },
+  ];
 
   const glPair = GL_PAIRS[randInt(0, GL_PAIRS.length - 1)];
   const spoofedVendor   = glPair.vendor;
@@ -211,6 +246,15 @@
   // ones — this way every extension user looks identical and blends into the
   // largest possible group ("Tor Browser approach"). Per-user random values
   // would just scatter users into many small unique buckets.
+
+  // User-Agent: spoof to Firefox 128 ESR (the most popular Firefox ESR).
+  // The HTTP-layer User-Agent header is rewritten by background.js — this
+  // override only handles the JS-side navigator.userAgent.
+  const SPOOFED_UA = 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0';
+  defineGetter(Navigator.prototype, 'userAgent',  () => SPOOFED_UA);
+  defineGetter(Navigator.prototype, 'appVersion', () => '5.0 (X11)');
+  defineGetter(Navigator.prototype, 'oscpu',      () => 'Linux x86_64');
+  defineGetter(Navigator.prototype, 'buildID',    () => '20181001000000');
 
   // hardwareConcurrency: 4 cores is the most common value globally
   defineGetter(Navigator.prototype, 'hardwareConcurrency', () => 4);

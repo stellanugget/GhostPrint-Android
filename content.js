@@ -1,9 +1,31 @@
 'use strict';
 
-// Generate a random seed for this page session.
-// Using synchronous XHR to inject before any page scripts run at document_start.
-const seed = ((Math.random() * 0xFFFFFFFF) >>> 0);
+// ─── PER-SESSION + PER-ORIGIN SEED (Brave-style farbling) ─────────────────
+// Stored in sessionStorage so the same origin, within the same tab session,
+// sees a consistent fingerprint across page loads. New tab / new session /
+// different origin → different seed.
+//
+// sessionStorage is keyed by origin, so storing under a fixed key gives us
+// per-origin scoping for free. It's per-tab (not cross-tab like Brave), but
+// that's a small deviation that doesn't reduce protection.
+const STORAGE_KEY = '__ghostprint_seed_v1__';
 
+let seed;
+try {
+  const stored = sessionStorage.getItem(STORAGE_KEY);
+  if (stored !== null) {
+    seed = parseInt(stored, 10) >>> 0;
+  } else {
+    seed = (Math.random() * 0xFFFFFFFF) >>> 0;
+    sessionStorage.setItem(STORAGE_KEY, String(seed));
+  }
+} catch (e) {
+  // sessionStorage may throw on some restricted contexts (e.g. about: pages,
+  // sandboxed iframes). Fall back to a per-page random seed.
+  seed = (Math.random() * 0xFFFFFFFF) >>> 0;
+}
+
+// ─── SYNCHRONOUS INJECTION ────────────────────────────────────────────────
 function injectScript(code) {
   const script = document.createElement('script');
   script.textContent = code;
@@ -11,15 +33,11 @@ function injectScript(code) {
   script.remove();
 }
 
-// Load inject.js synchronously so it runs before page scripts
 const xhr = new XMLHttpRequest();
 xhr.open('GET', browser.runtime.getURL('inject.js'), false);
 xhr.send(null);
 
 if (xhr.status === 200) {
-  // Wrap inject.js with the seed and settings stub — the full settings
-  // check is async, so the injection always runs (enabled by default).
-  // The popup toggle takes effect on the next page load via the seed skip.
   const preamble = `
     window.__ghostprint__ = {
       seed: ${seed},
@@ -28,10 +46,3 @@ if (xhr.status === 200) {
   `;
   injectScript(preamble + '\n' + xhr.responseText);
 }
-
-// After injecting, check settings asynchronously and store them
-// so the popup can read current state. Settings disable takes effect
-// on next page load (content scripts can't un-inject).
-browser.runtime.sendMessage({ type: 'GET_SETTINGS' }).then(settings => {
-  window.__ghostprintSettings = settings;
-}).catch(() => {});
