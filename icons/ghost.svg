@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Ghost body -->
+  <path d="M32 6
+           C17 6 10 18 10 32
+           L10 58
+           L17 51 L24 58 L32 51 L40 58 L47 51 L54 58
+           L54 32
+           C54 18 47 6 32 6 Z"
+        fill="#7c5cbf"/>
+  <!-- Wavy bottom edge overlay for ghost skirt effect -->
+  <path d="M10 50 L17 43 L24 50 L32 43 L40 50 L47 43 L54 50 L54 58 L47 51 L40 58 L32 51 L24 58 L17 51 L10 58 Z"
+        fill="#6a4daa"/>
+  <!-- Eyes: white base -->
+  <ellipse cx="24" cy="29" rx="7" ry="8" fill="white"/>
+  <ellipse cx="40" cy="29" rx="7" ry="8" fill="white"/>
+  <!-- Eyes: pupils -->
+  <circle cx="25" cy="30" r="4" fill="#1a1028"/>
+  <circle cx="41" cy="30" r="4" fill="#1a1028"/>
+  <!-- Eyes: shine -->
+  <circle cx="26.5" cy="28" r="1.8" fill="white" opacity="0.9"/>
+  <circle cx="42.5" cy="28" r="1.8" fill="white" opacity="0.9"/>
+</svg>

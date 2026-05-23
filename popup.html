@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GhostPrint</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app">
+
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <img src="icons/ghost.svg" alt="Ghost" class="logo">
+        <span class="title">GhostPrint</span>
+      </div>
+      <label class="toggle" title="Enable or disable protection">
+        <input type="checkbox" id="globalToggle">
+        <span class="slider"></span>
+      </label>
+    </header>
+
+    <!-- Status Banner -->
+    <div class="status-banner" id="statusBanner">
+      <span class="status-icon" id="statusIcon">🛡️</span>
+      <span class="status-text" id="statusText">Protected</span>
+    </div>
+
+    <!-- Session info -->
+    <div class="session-card">
+      <div class="session-label">Session fingerprint seed</div>
+      <div class="session-seed" id="sessionSeed">—</div>
+      <div class="session-note">Resets on each page load</div>
+    </div>
+
+    <!-- Protection list -->
+    <div class="section-title">Protections</div>
+    <div class="protections" id="protectionsList">
+      <!-- Populated by popup.js -->
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <button class="btn-reset" id="resetBtn">Reset to defaults</button>
+    </footer>
+
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

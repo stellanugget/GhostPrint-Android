@@ -1,0 +1,38 @@
+{
+  "manifest_version": 2,
+  "name": "GhostPrint",
+  "version": "1.0.0",
+  "description": "Randomize your browser fingerprint to protect your privacy, similar to Brave Browser's native protection.",
+  "author": "GhostPrint",
+  "permissions": [
+    "storage",
+    "tabs",
+    "activeTab",
+    "<all_urls>"
+  ],
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": false
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "browser_action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "48": "icons/ghost.svg",
+      "96": "icons/ghost.svg"
+    },
+    "default_title": "GhostPrint - Fingerprint Protection"
+  },
+  "icons": {
+    "48": "icons/ghost.svg",
+    "96": "icons/ghost.svg"
+  },
+  "web_accessible_resources": ["inject.js"]
+}
