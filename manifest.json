@@ -6,10 +6,6 @@
   "author": "GhostPrint",
   "permissions": [
     "storage",
-    "tabs",
-    "activeTab",
-    "webRequest",
-    "webRequestBlocking",
     "<all_urls>"
   ],
   "background": {

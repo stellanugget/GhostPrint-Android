@@ -1,41 +1,31 @@
 'use strict';
 
-const DEFAULT_SETTINGS = {
-  enabled: true,
-  protections: {
-    canvas: true, webgl: true, audio: true, navigator: true,
-    screen: true, webrtc: true, battery: true, fonts: true,
-    mediaDevices: true, timezone: true
-  }
-};
+const DEFAULT_SETTINGS = { enabled: true };
 
-const PROTECTION_META = [
-  { key: 'canvas',       icon: '🖼️',  label: 'Canvas'        },
-  { key: 'webgl',        icon: '🎮',  label: 'WebGL'         },
-  { key: 'audio',        icon: '🔊',  label: 'Audio'         },
-  { key: 'navigator',    icon: '🧭',  label: 'Navigator'     },
-  { key: 'screen',       icon: '🖥️',  label: 'Screen'        },
-  { key: 'webrtc',       icon: '📡',  label: 'WebRTC'        },
-  { key: 'battery',      icon: '🔋',  label: 'Battery'       },
-  { key: 'fonts',        icon: '🔤',  label: 'Fonts'         },
-  { key: 'mediaDevices', icon: '📷',  label: 'Media Devices' },
-  { key: 'timezone',     icon: '🕒',  label: 'Timezone'      },
+// The five fields EFF's Cover Your Tracks checks for cross-domain
+// randomization. If ≥ 4 of these differ between first-party domains,
+// the EFF result becomes "your browser has a randomized fingerprint".
+const EFF_FIELDS = [
+  { icon: '🔊', label: 'AudioContext'        },
+  { icon: '🖼️', label: 'Canvas hash'         },
+  { icon: '🎮', label: 'WebGL hash'          },
+  { icon: '🧩', label: 'Plugins'             },
+  { icon: '⚙️', label: 'Hardware concurrency' },
 ];
 
 let currentSettings = null;
 
 async function loadSettings() {
-  const result = await browser.storage.local.get('settings');
-  if (!result.settings) {
+  const r = await browser.storage.local.get('settings');
+  if (!r.settings) {
     await browser.storage.local.set({ settings: DEFAULT_SETTINGS });
-    return DEFAULT_SETTINGS;
+    return { ...DEFAULT_SETTINGS };
   }
-  // Merge in case new keys were added in an update
-  return { ...DEFAULT_SETTINGS, ...result.settings, protections: { ...DEFAULT_SETTINGS.protections, ...result.settings.protections } };
+  return { ...DEFAULT_SETTINGS, ...r.settings };
 }
 
-async function saveSettings(settings) {
-  await browser.storage.local.set({ settings });
+async function saveSettings(s) {
+  await browser.storage.local.set({ settings: s });
 }
 
 function renderSeed() {
@@ -48,43 +38,29 @@ function renderStatus(enabled) {
   const banner = document.getElementById('statusBanner');
   const icon   = document.getElementById('statusIcon');
   const text   = document.getElementById('statusText');
-
   if (enabled) {
     banner.className = 'status-banner active';
     icon.textContent  = '🛡️';
-    text.textContent  = 'Protected';
+    text.textContent  = 'Randomizing';
   } else {
     banner.className = 'status-banner inactive';
     icon.textContent  = '⚠️';
-    text.textContent  = 'Unprotected — reload page to apply';
+    text.textContent  = 'Disabled — reload pages';
   }
 }
 
-function renderProtections(settings) {
+function renderFields(enabled) {
   const list = document.getElementById('protectionsList');
   list.innerHTML = '';
-
-  for (const meta of PROTECTION_META) {
-    const on = settings.enabled && (settings.protections[meta.key] !== false);
-
+  for (const f of EFF_FIELDS) {
     const row = document.createElement('div');
-    row.className = 'protection-row ' + (on ? 'on' : 'off');
-    row.dataset.key = meta.key;
-    row.innerHTML = `
-      <div class="protection-left">
-        <span class="protection-icon">${meta.icon}</span>
-        <span class="protection-name">${meta.label}</span>
-      </div>
-      <div class="protection-dot"></div>
-    `;
-
-    row.addEventListener('click', async () => {
-      if (!currentSettings.enabled) return;
-      currentSettings.protections[meta.key] = !currentSettings.protections[meta.key];
-      await saveSettings(currentSettings);
-      renderProtections(currentSettings);
-    });
-
+    row.className = 'protection-row ' + (enabled ? 'on' : 'off');
+    row.innerHTML =
+      '<div class="protection-left">' +
+      '<span class="protection-icon">' + f.icon + '</span>' +
+      '<span class="protection-name">' + f.label + '</span>' +
+      '</div>' +
+      '<div class="protection-dot"></div>';
     list.appendChild(row);
   }
 }
@@ -92,26 +68,25 @@ function renderProtections(settings) {
 async function init() {
   currentSettings = await loadSettings();
 
-  const globalToggle = document.getElementById('globalToggle');
-  globalToggle.checked = currentSettings.enabled;
-
-  globalToggle.addEventListener('change', async () => {
-    currentSettings.enabled = globalToggle.checked;
+  const toggle = document.getElementById('globalToggle');
+  toggle.checked = currentSettings.enabled;
+  toggle.addEventListener('change', async () => {
+    currentSettings.enabled = toggle.checked;
     await saveSettings(currentSettings);
     renderStatus(currentSettings.enabled);
-    renderProtections(currentSettings);
+    renderFields(currentSettings.enabled);
   });
 
   document.getElementById('resetBtn').addEventListener('click', async () => {
-    currentSettings = { ...DEFAULT_SETTINGS, protections: { ...DEFAULT_SETTINGS.protections } };
+    currentSettings = { ...DEFAULT_SETTINGS };
     await saveSettings(currentSettings);
-    globalToggle.checked = currentSettings.enabled;
+    toggle.checked = currentSettings.enabled;
     renderStatus(currentSettings.enabled);
-    renderProtections(currentSettings);
+    renderFields(currentSettings.enabled);
   });
 
   renderStatus(currentSettings.enabled);
-  renderProtections(currentSettings);
+  renderFields(currentSettings.enabled);
   renderSeed();
 }
 
