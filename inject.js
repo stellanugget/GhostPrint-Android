@@ -6,8 +6,8 @@
 //   audio, canvas_hash_v2, webgl_hash_v2, plugins, hardware_concurrency
 //
 // CRITICAL: EFF runs each fingerprint TWICE per page. If our farbling depends
-// on the source pixel values, and Firefox's text rendering produces slight
-// sub-pixel variations between two newly-drawn canvases (which it does),
+// on the source pixel values, and the browser's text/canvas rendering produces
+// slight sub-pixel variations between two newly-drawn canvases (which it can),
 // our output differs between the two runs → EFF marks it "randomized"
 // *within page* → both first-party domains report the same "randomized"
 // string → cross-domain check sees no difference → no credit.
@@ -44,10 +44,18 @@
   }
 
   // ─── CANVAS ──────────────────────────────────────────────────────────────
-  // Replace canvas read outputs with a pure (width, height, position, seed)
-  // pattern. Source pixels are ignored — that's the only way to be robust
-  // against Firefox's text-rendering non-determinism between two consecutive
-  // canvas draws on different element instances.
+  // Farble canvas reads the way Brave does: apply tiny, IMPERCEPTIBLE, seed-
+  // determined noise to the *real* pixels instead of replacing them. This is
+  // both correct for EFF and non-destructive for legitimate canvas use
+  // (image editors, croppers, format converters, QR/chart exporters, etc.).
+  //
+  // Determinism is what makes this safe for EFF's twice-per-page probe: the
+  // perturbation is a pure function of (seed, pixel position, source pixel
+  // values). EFF draws the *same* probe canvas on both runs, so identical
+  // source pixels + identical seed → byte-identical output → a stable hash
+  // within the page. A different first-party origin has a different seed →
+  // different noise → a different hash → the cross-domain difference EFF
+  // rewards with the "randomized fingerprint" status.
 
   const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
   const origToDataURL    = HTMLCanvasElement.prototype.toDataURL;
@@ -55,54 +63,61 @@
   const origGetContext   = HTMLCanvasElement.prototype.getContext;
   const origCreateElement = Document.prototype.createElement;
 
-  // Build a canvas filled with seed-based pixel data. Same dims + same seed
-  // → byte-identical output every time.
-  function buildSeedCanvas(width, height) {
-    const tmp = origCreateElement.call(document, 'canvas');
-    tmp.width = width;
-    tmp.height = height;
-    const ctx = origGetContext.call(tmp, '2d');
-    const id = ctx.createImageData(width, height);
-    const data = id.data;
-    for (let i = 0; i < data.length; i += 4) {
-      const h = mix(i, width, height);
-      data[i]     = h          & 0xff;
-      data[i + 1] = (h >>> 8)  & 0xff;
-      data[i + 2] = (h >>> 16) & 0xff;
-      data[i + 3] = 255;
+  function clampByte(v) {
+    return v < 0 ? 0 : v > 255 ? 255 : v;
+  }
+
+  // Perturb pixel data in place: nudge a sparse, seed-determined subset of
+  // pixels by -1/0/+1 per RGB channel. Alpha is left untouched. The change is
+  // visually undetectable but shifts the canvas hash deterministically.
+  function farblePixels(data, width, height) {
+    for (let i = 0; i + 3 < data.length; i += 4) {
+      const h = mix(i, width, height, data[i], data[i + 1], data[i + 2]);
+      if ((h & 0x1f) === 0) { // ~1 pixel in 32
+        data[i]     = clampByte(data[i]     + ((h >>> 5)  % 3) - 1);
+        data[i + 1] = clampByte(data[i + 1] + ((h >>> 11) % 3) - 1);
+        data[i + 2] = clampByte(data[i + 2] + ((h >>> 17) % 3) - 1);
+      }
     }
-    ctx.putImageData(id, 0, 0);
-    return tmp;
+  }
+
+  // Snapshot a canvas (2D or WebGL) into a fresh 2D canvas, farble it, and
+  // return that canvas so the original is never mutated. Returns null if the
+  // source can't be snapshotted (e.g. tainted/cross-origin) so callers fall
+  // back to the unmodified original.
+  function farbledCopy(src) {
+    const w = src.width, h = src.height;
+    if (w <= 0 || h <= 0) return null;
+    try {
+      const tmp = origCreateElement.call(document, 'canvas');
+      tmp.width = w;
+      tmp.height = h;
+      const tctx = origGetContext.call(tmp, '2d');
+      tctx.drawImage(src, 0, 0);
+      const id = origGetImageData.call(tctx, 0, 0, w, h);
+      farblePixels(id.data, w, h);
+      tctx.putImageData(id, 0, 0);
+      return tmp;
+    } catch (_) {
+      return null;
+    }
   }
 
   CanvasRenderingContext2D.prototype.getImageData = function (sx, sy, sw, sh) {
     const id = origGetImageData.call(this, sx, sy, sw, sh);
-    const data = id.data;
-    for (let i = 0; i < data.length; i += 4) {
-      const h = mix(i, sw, sh);
-      data[i]     = h          & 0xff;
-      data[i + 1] = (h >>> 8)  & 0xff;
-      data[i + 2] = (h >>> 16) & 0xff;
-      data[i + 3] = 255;
-    }
+    farblePixels(id.data, sw, sh);
     return id;
   };
 
   HTMLCanvasElement.prototype.toDataURL = function (type, quality) {
-    if (this.width > 0 && this.height > 0) {
-      try {
-        return origToDataURL.call(buildSeedCanvas(this.width, this.height), type, quality);
-      } catch (_) {}
-    }
+    const copy = farbledCopy(this);
+    if (copy) return origToDataURL.call(copy, type, quality);
     return origToDataURL.call(this, type, quality);
   };
 
   HTMLCanvasElement.prototype.toBlob = function (callback, type, quality) {
-    if (this.width > 0 && this.height > 0) {
-      try {
-        return origToBlob.call(buildSeedCanvas(this.width, this.height), callback, type, quality);
-      } catch (_) {}
-    }
+    const copy = farbledCopy(this);
+    if (copy) return origToBlob.call(copy, callback, type, quality);
     return origToBlob.call(this, callback, type, quality);
   };
 
@@ -116,13 +131,18 @@
       const origReadPixels = ctx.readPixels.bind(ctx);
       ctx.readPixels = function (x, y, w, h, format, t, pixels) {
         origReadPixels(x, y, w, h, format, t, pixels);
-        if (pixels && pixels.length) {
-          for (let i = 0; i < pixels.length; i += 4) {
-            const hash = mix(i, w, h);
-            pixels[i]     = hash          & 0xff;
-            pixels[i + 1] = (hash >>> 8)  & 0xff;
-            pixels[i + 2] = (hash >>> 16) & 0xff;
-            if (i + 3 < pixels.length) pixels[i + 3] = 255;
+        // Only perturb 8-bit pixel buffers (the usual fingerprinting case);
+        // leave float/other formats untouched so a ±1 nudge can't corrupt
+        // legitimate reads. Same imperceptible, deterministic noise as 2D.
+        if (pixels && pixels.length &&
+            (pixels instanceof Uint8Array || pixels instanceof Uint8ClampedArray)) {
+          for (let i = 0; i + 3 < pixels.length; i += 4) {
+            const hash = mix(i, w, h, pixels[i], pixels[i + 1], pixels[i + 2]);
+            if ((hash & 0x1f) === 0) {
+              pixels[i]     = clampByte(pixels[i]     + ((hash >>> 5)  % 3) - 1);
+              pixels[i + 1] = clampByte(pixels[i + 1] + ((hash >>> 11) % 3) - 1);
+              pixels[i + 2] = clampByte(pixels[i + 2] + ((hash >>> 17) % 3) - 1);
+            }
           }
         }
       };
