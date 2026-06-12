@@ -35,7 +35,7 @@
   "web_accessible_resources": ["inject.js"],
   "browser_specific_settings": {
     "gecko": {
-      "id": "ghostprint@ghostprint.extension"
+      "id": "ghostprint@gnustella-lab"
     },
     "gecko_android": {}
   }
