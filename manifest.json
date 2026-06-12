@@ -32,5 +32,11 @@
     "48": "icons/ghost.svg",
     "96": "icons/ghost.svg"
   },
-  "web_accessible_resources": ["inject.js"]
+  "web_accessible_resources": ["inject.js"],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "ghostprint@ghostprint.extension"
+    },
+    "gecko_android": {}
+  }
 }
